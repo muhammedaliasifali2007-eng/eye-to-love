@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eye -> Space (Red Love) — Fullscreen</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body {
+    width: 100vw;
+    height: 100vh;
+    background: #000000;
+    color: #ffffff;
+    overflow: hidden;
+    font-family: Consolas, "Courier New", ui-monospace, monospace;
+    user-select: none;
+  }
+
+  #asciiCanvas {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+  }
+
+  /* Minimal auto-fading HUD in bottom-right corner */
+  .hud {
+    position: fixed;
+    bottom: 16px;
+    right: 18px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(14, 14, 20, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 12px;
+    color: #d1d5db;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    backdrop-filter: blur(6px);
+  }
+
+  body:hover .hud,
+  .hud:focus-within {
+    opacity: 1;
+  }
+
+  .hud button {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .hud button:hover {
+    background: rgba(224, 82, 118, 0.85);
+    border-color: rgba(224, 82, 118, 1);
+  }
+
+  .hud input[type="range"] {
+    width: 110px;
+    accent-color: #e05276;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+  <canvas id="asciiCanvas"></canvas>
+
+  <div class="hud">
+    <button id="btnPlayPause">Pause</button>
+    <button id="btnRestart">Restart</button>
+    <input type="range" id="timeSlider" min="0" max="15.5" step="0.05" value="0">
+    <span id="timeLabel" style="min-width:34px;text-align:right;font-variant-numeric:tabular-nums;">0.0s</span>
+    <button id="btnFullscreen" title="Toggle Fullscreen (F or Double-Click)">Fullscreen</button>
+  </div>
+
+<script>
+(() => {
+  // 70-character Paul Bourke luminance ramp (dark -> bright)
+  const RAMP = " .'`^\",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+  const N_RAMP = RAMP.length;
+
+  const canvas = document.getElementById("asciiCanvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+
+  const btnPlayPause = document.getElementById("btnPlayPause");
+  const btnRestart = document.getElementById("btnRestart");
+  const btnFullscreen = document.getElementById("btnFullscreen");
+  const timeSlider = document.getElementById("timeSlider");
+  const timeLabel = document.getElementById("timeLabel");
+
+  // Dynamic fullscreen grid state
+  let COLS = 120;
+  let ROWS = 40;
+  let CELL_W = 9;
+  let CELL_H = 17;
+  let FONT_PX = 14;
+  let dpr = 1;
+  let uHalf = 0.54;
+  let vTop = -0.38;
+  let vBot = 0.28;
+
+  let eyeRGB = new Float32Array(ROWS * COLS * 3);
+  let pmBuf = new Float32Array(ROWS * COLS);
+  let spaceRGB = new Float32Array(ROWS * COLS * 3);
+  let starCharBuf = new Array(ROWS * COLS);
+
+  function resizeFullscreenGrid() {
+    const vw = Math.max(320, window.innerWidth);
+    const vh = Math.max(240, window.innerHeight);
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    canvas.width = Math.floor(vw * dpr);
+    canvas.height = Math.floor(vh * dpr);
+
+    // Choose character cell size so we get ~110-145 columns across full screen
+    CELL_W = Math.max(7, Math.min(12, Math.round(vw / 128)));
+    CELL_H = Math.round(CELL_W * 1.85);
+    FONT_PX = Math.round(CELL_H * 0.86);
+
+    COLS = Math.max(60, Math.ceil(vw / CELL_W));
+    ROWS = Math.max(24, Math.ceil(vh / CELL_H));
+
+    // Aspect-correct world coordinate bounds so the eye & 3D heart fill the screen without stretching
+    const screenAspect = vw / vh;
+    const vSpan = 0.64;
+    vTop = -0.36;
+    vBot = vTop + vSpan;
+    uHalf = clamp(0.5 * vSpan * screenAspect * 0.92, 0.38, 0.72);
+
+    eyeRGB = new Float32Array(ROWS * COLS * 3);
+    pmBuf = new Float32Array(ROWS * COLS);
+    spaceRGB = new Float32Array(ROWS * COLS * 3);
+    starCharBuf = new Array(ROWS * COLS);
+  }
+
+  window.addEventListener("resize", resizeFullscreenGrid);
+  resizeFullscreenGrid();
+
+  function clamp(x, a, b) {
+    return x < a ? a : (x > b ? b : x);
+  }
+
+  function ss(a, b, x) {
+    const t = clamp((x - a) / (b - a + 1e-12), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+
+  function mix(a, b, t) {
+    return a * (1.0 - t) + b * t;
+  }
+
+  // Deterministic PRNG
+  function mulberry32(seed) {
+    return function() {
+      let t = seed += 0x6D2B79F5;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Generate smooth tileable 256x256 2D noise textures TS and TW
+  const TEX_N = 256;
+  function makeSmoothTile(rng, layers) {
+    const acc = new Float32Array(TEX_N * TEX_N);
+    let totalW = 0;
+    for (const [step, weight] of layers) {
+      const gh = TEX_N / step;
+      const gw = TEX_N / step;
+      const g = new Float32Array(gh * gw);
+      for (let i = 0; i < g.length; i++) g[i] = rng();
+
+      for (let y = 0; y < TEX_N; y++) {
+        const yf = y / step;
+        const y0 = Math.floor(yf) % gh;
+        const y1 = (y0 + 1) % gh;
+        let fy = yf - Math.floor(yf);
+        fy = fy * fy * (3 - 2 * fy);
+        for (let x = 0; x < TEX_N; x++) {
+          const xf = x / step;
+          const x0 = Math.floor(xf) % gw;
+          const x1 = (x0 + 1) % gw;
+          let fx = xf - Math.floor(xf);
+          fx = fx * fx * (3 - 2 * fx);
+
+          const v00 = g[y0 * gw + x0];
+          const v10 = g[y0 * gw + x1];
+          const v01 = g[y1 * gw + x0];
+          const v11 = g[y1 * gw + x1];
+          const val = v00 * (1 - fx) * (1 - fy) + v10 * fx * (1 - fy) + v01 * (1 - fx) * fy + v11 * fx * fy;
+          acc[y * TEX_N + x] += val * weight;
+        }
+      }
+      totalW += weight;
+    }
+    let minV = Infinity, maxV = -Infinity;
+    for (let i = 0; i < acc.length; i++) {
+      acc[i] /= totalW;
+      if (acc[i] < minV) minV = acc[i];
+      if (acc[i] > maxV) maxV = acc[i];
+    }
+    const span = (maxV - minV) || 1;
+    for (let i = 0; i < acc.length; i++) {
+      acc[i] = (acc[i] - minV) / span;
+    }
+    return acc;
+  }
+
+  const rngTex = mulberry32(42);
+  const TS = makeSmoothTile(rngTex, [[16, 0.50], [8, 0.30], [4, 0.15], [2, 0.05]]);
+  const TW = makeSmoothTile(rngTex, [[32, 0.45], [16, 0.30], [8, 0.15], [4, 0.10]]);
+
+  function bil(T, x, y) {
+    const xFl = Math.floor(x);
+    const yFl = Math.floor(y);
+    const fx = x - xFl;
+    const fy = y - yFl;
+    const x0 = ((xFl % TEX_N) + TEX_N) % TEX_N;
+    const y0 = ((yFl % TEX_N) + TEX_N) % TEX_N;
+    const x1 = (x0 + 1) & 255;
+    const y1 = (y0 + 1) & 255;
+    return (
+      T[y0 * TEX_N + x0] * (1 - fx) * (1 - fy) +
+      T[y0 * TEX_N + x1] * fx * (1 - fy) +
+      T[y1 * TEX_N + x0] * (1 - fx) * fy +
+      T[y1 * TEX_N + x1] * fx * fy
+    );
+  }
+
+  // Precompute 360 3D stars
+  const STAR_COUNT = 360;
+  const rngStar = mulberry32(108);
+  const stars = [];
+  for (let i = 0; i < STAR_COUNT; i++) {
+    const isCore = i < STAR_COUNT / 2;
+    let sx, sy;
+    if (isCore) {
+      const u1 = Math.max(1e-6, rngStar());
+      const u2 = rngStar();
+      const mag = Math.sqrt(-2.0 * Math.log(u1));
+      sx = mag * Math.cos(2 * Math.PI * u2) * 0.22;
+      sy = mag * Math.sin(2 * Math.PI * u2) * 0.16;
+    } else {
+      sx = (rngStar() * 2 - 1) * 1.15;
+      sy = (rngStar() * 2 - 1) * 0.70;
+    }
+    const sz0 = 0.05 + rngStar() * 0.95;
+    const sbright = 0.55 + rngStar() * 0.45;
+    const sphase = rngStar() * Math.PI * 2;
+    const r = rngStar();
+    const ssize = r < 0.52 ? 0 : (r < 0.82 ? 1 : 2);
+    stars.push({ sx, sy, sz0, sbright, sphase, ssize });
+  }
+
+  const WO = 0.43;
+
+  function sceneParams(t) {
+    const openIn = ss(0.85, 1.95, t);
+    const blink = 0.78 * Math.exp(-Math.pow((t - 3.15) / 0.13, 2));
+    const widen = 0.12 * ss(4.5, 7.0, t);
+    const ou = clamp(openIn - blink + widen, 0.0, 1.08);
+
+    const gazeFade = ss(5.2, 4.0, t);
+    const gx = (
+      -0.055 * Math.exp(-Math.pow((t - 2.45) / 0.55, 2)) +
+       0.048 * Math.exp(-Math.pow((t - 3.65) / 0.50, 2))
+    ) * gazeFade;
+    const gy = (
+      0.010 * Math.sin(t * 2.1) -
+      0.014 * Math.exp(-Math.pow((t - 3.15) / 0.25, 2))
+    ) * gazeFade;
+
+    let z;
+    if (t < 4.3) {
+      z = 1.0 + 0.05 * ss(1.5, 4.3, t);
+    } else {
+      const zt = (t - 4.3) / 9.0;
+      z = 1.05 * Math.exp(3.40 * Math.pow(zt, 1.32));
+    }
+
+    const Rp = 0.058 + 0.052 * ss(4.5, 8.8, t);
+    return { z, ou, gx, gy, Rp };
+  }
+
+  function renderFrame(t) {
+    const { z, ou, gx, gy, Rp } = sceneParams(t);
+    const zoomCenterY = -0.05 * ss(3.5, 1.0, z);
+    const spaceVis = ss(4.6, 6.2, t);
+    const deepSpace = ss(9.2, 11.6, t);
+    const fadeIn = ss(0.45, 1.25, t);
+
+    spaceRGB.fill(0);
+    starCharBuf.fill("");
+
+    // 3D Red Love Heart parameters (with rhythmic lub-dub heartbeat pulse)
+    const flight = clamp((t - 7.2) / 6.8, 0.0, 1.0);
+    const flightSmooth = flight * flight * (3.0 - 2.0 * flight);
+    const beatPhase = (t * 1.35) % 1.0;
+    const lub = Math.exp(-Math.pow((beatPhase - 0.18) / 0.065, 2));
+    const dub = 0.65 * Math.exp(-Math.pow((beatPhase - 0.36) / 0.08, 2));
+    const heartbeat = 1.0 + 0.065 * (lub + dub) * flightSmooth;
+
+    const R_heart = (0.010 + 0.235 * Math.pow(flightSmooth, 1.10)) * heartbeat;
+    const tilt = 0.06 * Math.sin(t * 1.4);
+    const sway = 1.0 - 0.08 * Math.pow(Math.sin(t * 1.1), 2);
+    const ct = Math.cos(tilt), st = Math.sin(tilt);
+
+    function heartRadiusAt(uScrVal, vRelVal) {
+      const rawX = uScrVal / (R_heart + 1e-6);
+      const rawY = -vRelVal / (R_heart + 1e-6) - 0.08;
+      const hx = (rawX * ct - rawY * st) / sway;
+      const hy = rawX * st + rawY * ct;
+      const widthScale = 0.84 + 0.34 * clamp((hy + 0.55) / 1.25, 0.0, 1.0);
+      const xNorm = hx / widthScale;
+      const lobeArch = 0.68 * Math.pow(Math.abs(xNorm), 0.72);
+      const yLobe = (hy - lobeArch + 0.24) / 0.86;
+      return { hx, hy, xNorm, yLobe, hr2: xNorm * xNorm + yLobe * yLobe };
+    }
+
+    for (let r = 0; r < ROWS; r++) {
+      const vScr = vTop + (r / (ROWS - 1)) * (vBot - vTop);
+      const vRel = vScr - zoomCenterY;
+      const v = vRel / z + gy;
+
+      for (let c = 0; c < COLS; c++) {
+        const idx = r * COLS + c;
+        const idx3 = idx * 3;
+        const uScr = -uHalf + (c / (COLS - 1)) * (2 * uHalf);
+        const u = uScr / z + gx;
+
+        // --- EYE SHADER ---
+        const s = u / WO;
+        const vt = v - 0.012 * s;
+        const arch = clamp(1.0 - s * s, 0.0, 1.0);
+        const closedY = 0.020 * (1.0 - arch * 0.4);
+        const openUp = -0.185 * Math.pow(arch, 0.76) - 0.014 * Math.exp(-Math.pow((s - 0.12) / 0.45, 2));
+        const openLo =  0.125 * Math.pow(arch, 0.84) + 0.010 * Math.exp(-Math.pow((s + 0.10) / 0.50, 2));
+
+        const yUp = mix(closedY, openUp, ou);
+        const yLo = mix(closedY + 0.002, openLo, ou);
+        const yMid = 0.5 * (yUp + yLo);
+
+        const upper = vt < yMid;
+        const du = Math.max(0.0, yUp - vt);
+        const dl = Math.max(0.0, vt - yLo);
+
+        const mIn = (
+          ss(yUp - 0.008, yUp + 0.006, vt) *
+          ss(yLo + 0.008, yLo - 0.006, vt) *
+          ss(1.04, 0.91, Math.abs(s)) *
+          ss(0.01, 0.08, ou)
+        );
+
+        const rBall = Math.sqrt(Math.pow(u / 0.45, 2) + Math.pow(vt / 0.27, 2));
+        let scleraSh = clamp(1.08 - 0.50 * Math.pow(rBall, 1.55), 0.20, 1.0);
+        const lidCast = ss(yUp - 0.004, yUp + 0.045, vt);
+        scleraSh *= (0.48 + 0.52 * lidCast);
+
+        const veinN = bil(TW, u * 110 + 13, vt * 110 + 29);
+        const cornerRed = Math.pow(clamp((Math.abs(s) - 0.50) / 0.50, 0.0, 1.0), 1.5);
+        const crMix = cornerRed * (0.45 + 0.35 * veinN);
+        const scR = mix(0.94, 0.84, crMix) * scleraSh;
+        const scG = mix(0.90, 0.48, crMix) * scleraSh;
+        const scB = mix(0.88, 0.44, crMix) * scleraSh;
+
+        // Iris & Pupil
+        const iu = u - gx;
+        const iv = vt - gy;
+        const ir = Math.sqrt(iu * iu + iv * iv + 1e-10);
+        const itheta = Math.atan2(iv, iu);
+        const R_iris = 0.172;
+        const rNorm = ir / R_iris;
+
+        const angU = (itheta / (2 * Math.PI) + 0.5) * 180.0;
+        const radV = rNorm * 45.0;
+        const f1 = bil(TW, angU, radV);
+        const f2 = bil(TS, angU * 2.0 + 37.0, radV * 1.5 + 19.0);
+        const fibers = clamp(0.55 * f1 + 0.45 * f2 + 0.22 * Math.sin(itheta * 40.0 + f1 * 4.0), 0.0, 1.0);
+
+        const rPNorm = Rp / R_iris;
+        const collarette = Math.exp(-Math.pow((rNorm - (rPNorm + 0.15)) / 0.14, 2));
+        const limbalRing = ss(0.74, 0.98, rNorm);
+        const irisLight = (0.55 + 0.45 * lidCast) * (0.88 + 0.32 * clamp((iv / R_iris) + 0.35, 0.0, 1.0));
+
+        let irR = mix(0.52, 0.82, fibers);
+        let irG = mix(0.26, 0.48, fibers);
+        let irB = mix(0.13, 0.24, fibers);
+        irR = mix(irR, 0.95, collarette * 0.65);
+        irG = mix(irG, 0.64, collarette * 0.65);
+        irB = mix(irB, 0.36, collarette * 0.65);
+        irR = mix(irR, 0.08, limbalRing * 0.80) * irisLight;
+        irG = mix(irG, 0.04, limbalRing * 0.80) * irisLight;
+        irB = mix(irB, 0.03, limbalRing * 0.80) * irisLight;
+
+        const mIris = ss(R_iris + 0.008, R_iris - 0.008, ir);
+        const pmRaw = ss(Rp + 0.008, Rp - 0.006, ir);
+
+        let inR = mix(scR, irR, mIris);
+        let inG = mix(scG, irG, mIris);
+        let inB = mix(scB, irB, mIris);
+        inR = mix(inR, 0.01, pmRaw);
+        inG = mix(inG, 0.01, pmRaw);
+        inB = mix(inB, 0.015, pmRaw);
+
+        const specFade = ss(9.0, 2.2, z);
+        const sp1 = Math.exp(-(Math.pow((iu - 0.046) / 0.024, 2) + Math.pow((iv + 0.040) / 0.018, 2))) * 1.15;
+        const sp2 = Math.exp(-(Math.pow((iu + 0.052) / 0.014, 2) + Math.pow((iv - 0.042) / 0.011, 2))) * 0.65;
+        const spTot = (sp1 + sp2) * specFade * lidCast;
+        inR += spTot * 1.0;
+        inG += spTot * 0.98;
+        inB += spTot * 0.95;
+
+        const dd = upper ? du : dl;
+        const tx = bil(TS, u * 120 + 100, v * 120 + 100);
+        const skinMul = 0.90 + 0.20 * tx;
+        let skR = 0.62 * skinMul;
+        let skG = 0.40 * skinMul;
+        let skB = 0.29 * skinMul;
+
+        let sh = 0.50 + 0.50 * ss(0, 0.30, dd);
+        sh += 0.10 * Math.exp(-Math.pow((v + 0.20) / 0.09, 2));
+        const crPos = 0.075 + 0.03 * (1.0 - ou);
+        if (upper) {
+          sh -= 0.42 * Math.exp(-Math.pow((du - crPos) / 0.020, 2));
+        } else {
+          sh += 0.08 * Math.exp(-Math.pow((dl - 0.09) / 0.04, 2));
+        }
+        skR *= sh; skG *= sh; skB *= sh;
+
+        const lidzone = upper ? ss(crPos, crPos * 0.4, du) * 0.5 : 0.0;
+        skR = mix(skR, 0.68 * sh, lidzone);
+        skG = mix(skG, 0.40 * sh, lidzone);
+        skB = mix(skB, 0.31 * sh, lidzone);
+
+        const sb = clamp(1.0 - Math.abs(s), 0.0, 1.0);
+        const eb = Math.exp(-Math.pow((vt + 0.34 + 0.09 * s * s) / (0.042 + 0.014 * sb), 2)) * ss(1.32, 0.82, Math.abs(s));
+        const hair = 0.55 + 0.9 * bil(TW, u * 90, v * 30);
+        const ebMix = clamp(eb * hair, 0.0, 0.92);
+        skR = mix(skR, 0.10, ebMix);
+        skG = mix(skG, 0.06, ebMix);
+        skB = mix(skB, 0.04, ebMix);
+
+        if (upper) {
+          const lashWave = 0.5 + 0.5 * Math.sin((s + du * 0.55 * (s >= 0 ? 1 : -1)) * 125.0 + bil(TW, u * 80, v * 80) * 2.2);
+          const lashesU = Math.exp(-Math.pow(du / (0.016 + 0.024 * lashWave * sb), 2)) * ss(1.02, 0.82, Math.abs(s));
+          const line = Math.max(Math.exp(-Math.pow(du / 0.010, 2)), lashesU * 0.88);
+          const lMix = clamp(line * (1.0 - 0.3 * ou) * 0.9, 0.0, 1.0);
+          skR = mix(skR, 0.05, lMix);
+          skG = mix(skG, 0.03, lMix);
+          skB = mix(skB, 0.022, lMix);
+        } else {
+          const wl = ss(0.014, 0.0, dl) * ss(1.02, 0.85, Math.abs(s)) * 0.7;
+          skR = mix(skR, 0.74, wl);
+          skG = mix(skG, 0.34, wl);
+          skB = mix(skB, 0.30, wl);
+
+          const gl = Math.exp(-Math.pow((dl - 0.016) / 0.006, 2)) * (0.35 + 0.65 * bil(TW, u * 60, v * 60)) * ss(1.0, 0.8, Math.abs(s));
+          const glAdd = gl * 0.55 * ss(0.12, 0.5, ou);
+          skR += glAdd * 1.0;
+          skG += glAdd * 0.85;
+          skB += glAdd * 0.75;
+        }
+
+        const sp_ = (bil(TW, u * 150 + 7, v * 150 + 3) > 0.985 ? 1.0 : 0.0) * 0.35 * (0.4 + tx) * ss(0.0, 0.3, dd);
+        skR += sp_ * 1.0;
+        skG += sp_ * 0.9;
+        skB += sp_ * 0.8;
+
+        let colR = mix(skR, inR, mIn);
+        let colG = mix(skG, inG, mIn);
+        let colB = mix(skB, inB, mIn);
+
+        const cg = Math.exp(-(Math.pow((u + WO * 0.90) / 0.045, 2) + Math.pow((vt - 0.025) / 0.032, 2))) * ss(0.1, 0.5, ou) * 0.85;
+        colR = mix(colR, 0.82, cg);
+        colG = mix(colG, 0.42, cg);
+        colB = mix(colB, 0.38, cg);
+
+        eyeRGB[idx3]     = clamp(colR, 0, 1);
+        eyeRGB[idx3 + 1] = clamp(colG, 0, 1);
+        eyeRGB[idx3 + 2] = clamp(colB, 0, 1);
+        pmBuf[idx] = pmRaw * mIn;
+
+        // --- SPACE 3D RED LOVE HEART SHADER ---
+        if (spaceVis > 0.001) {
+          const { hx, hy, xNorm, yLobe, hr2 } = heartRadiusAt(uScr, vRel);
+          const hr = Math.sqrt(hr2);
+
+          const halo = Math.exp(-Math.pow((hr - 0.94) / 0.26, 2)) * ss(0.04, 0.24, flight) * (1.0 + 0.25 * (lub + dub));
+          let spR = halo * 0.62;
+          let spG = halo * 0.08;
+          let spB = halo * 0.18;
+
+          if (hr < 1.05 && flight > 0.04) {
+            const cleft = 0.26 * Math.exp(-Math.pow(hx / 0.20, 2)) * clamp((hy - 0.02) / 0.65, 0.0, 1.0);
+            const hz = Math.sqrt(Math.max(0.0, 1.0 - hr2)) * (1.0 - cleft);
+
+            let nx = xNorm * 0.85 + 0.25 * (hx >= 0 ? 1 : -1) * Math.exp(-Math.pow(hx / 0.22, 2)) * clamp(hy, 0.0, 1.0);
+            let ny = yLobe * 0.85;
+            let nz = Math.max(0.15, hz);
+            const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz + 1e-8);
+            nx /= nLen; ny /= nLen; nz /= nLen;
+
+            const latH = Math.asin(clamp(ny, -1.0, 1.0));
+            const lonH = Math.atan2(nx, nz) + t * 0.60;
+            const nSwirl = bil(TW, (lonH / (2 * Math.PI) + 0.5) * 28.0, (latH / Math.PI + 0.5) * 28.0);
+            const bandWave = Math.cos(hy * 14.0 - t * 1.8 + (nSwirl - 0.5) * 1.2);
+            const bands = clamp(0.55 + 0.45 * bandWave, 0.0, 1.0);
+
+            let hR = mix(0.38, 0.95, bands);
+            let hG = mix(0.03, 0.14, bands);
+            let hB = mix(0.08, 0.26, bands);
+
+            const lx = -0.32, ly = 0.38, lz = 0.868;
+            const ndotl = clamp(nx * lx + ny * ly + nz * lz, 0.0, 1.0);
+            const hxL = lx, hyL = ly, hzL = lz + 1.0;
+            const hLen = Math.sqrt(hxL * hxL + hyL * hyL + hzL * hzL);
+            const spec = Math.pow(clamp((nx * hxL + ny * hyL + nz * hzL) / hLen, 0.0, 1.0), 14.0);
+
+            const limb = Math.pow(hz, 0.34) * (0.32 + 0.85 * ndotl);
+            hR *= limb; hG *= limb; hB *= limb;
+
+            const hiMix = clamp(spec * 0.92 + Math.pow(bands, 2.2) * ndotl * 0.55, 0.0, 1.0);
+            hR = mix(hR, 1.00, hiMix);
+            hG = mix(hG, 0.72, hiMix);
+            hB = mix(hB, 0.80, hiMix);
+
+            const rim = Math.pow(1.0 - hz, 2.0) * 0.62;
+            hR += rim * 0.85;
+            hG += rim * 0.12;
+            hB += rim * 0.24;
+
+            const hMask = ss(1.02, 0.92, hr) * ss(0.04, 0.18, flight);
+            spR = mix(spR, hR, hMask);
+            spG = mix(spG, hG, hMask);
+            spB = mix(spB, hB, hMask);
+          }
+
+          spaceRGB[idx3]     = spR;
+          spaceRGB[idx3 + 1] = spG;
+          spaceRGB[idx3 + 2] = spB;
+        }
+      }
+    }
+
+    // --- 3D STARFIELD WITH 4-POINT CROSS FLARES ---
+    if (spaceVis > 0.001) {
+      const uMin = -uHalf, uMax = uHalf;
+      const vMin = vTop - zoomCenterY, vMax = vBot - zoomCenterY;
+      for (let i = 0; i < STAR_COUNT; i++) {
+        const stObj = stars[i];
+        let sz = (stObj.sz0 - (t * 0.095)) % 1.0;
+        if (sz < 0) sz += 1.0;
+        sz = Math.max(sz, 0.04);
+
+        const denom = sz * 1.35 + 0.15;
+        const projX = stObj.sx / denom;
+        const projY = stObj.sy / denom;
+
+        const c0 = Math.round(((projX - uMin) / (uMax - uMin)) * (COLS - 1));
+        const r0 = Math.round(((projY - vMin) / (vMax - vMin)) * (ROWS - 1));
+        if (r0 < 0 || r0 >= ROWS || c0 < 0 || c0 >= COLS) continue;
+
+        const uScr0 = uMin + (c0 / (COLS - 1)) * (uMax - uMin);
+        const vRel0 = vMin + (r0 / (ROWS - 1)) * (vMax - vMin);
+        const pr0 = Math.sqrt(heartRadiusAt(uScr0, vRel0).hr2);
+        if (pr0 < 0.95 && flight > 0.10) continue;
+
+        const twinkle = 0.70 + 0.30 * Math.sin(t * 5.5 + stObj.sphase);
+        const depthFade = ss(1.0, 0.12, sz) * ss(0.04, 0.10, sz);
+        const b = stObj.sbright * twinkle * depthFade * spaceVis;
+        if (b < 0.14) continue;
+
+        const sInt = Math.min(1.0, b * 1.45);
+        const putStarCell = (rr, cc, ch, f) => {
+          if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) return;
+          const uS = uMin + (cc / (COLS - 1)) * (uMax - uMin);
+          const vR = vMin + (rr / (ROWS - 1)) * (vMax - vMin);
+          const prC = Math.sqrt(heartRadiusAt(uS, vR).hr2);
+          if (prC < 0.95 && flight > 0.10) return;
+          const k = rr * COLS + cc;
+          const k3 = k * 3;
+          spaceRGB[k3]     = Math.max(spaceRGB[k3],     0.96 * sInt * f);
+          spaceRGB[k3 + 1] = Math.max(spaceRGB[k3 + 1], 0.97 * sInt * f);
+          spaceRGB[k3 + 2] = Math.max(spaceRGB[k3 + 2], 1.00 * sInt * f);
+          if (starCharBuf[k] === "" || f >= 0.8) {
+            starCharBuf[k] = ch;
+          }
+        };
+
+        if (stObj.ssize === 0 || sz > 0.68) {
+          putStarCell(r0, c0, b < 0.48 ? "." : (b < 0.78 ? "+" : "*"), 1.0);
+        } else if (stObj.ssize === 1 || (sz < 0.45 && b > 0.55)) {
+          putStarCell(r0, c0, b < 0.82 ? "*" : "@", 1.0);
+          putStarCell(r0, c0 - 2, ".", 0.45);
+          putStarCell(r0, c0 - 1, "-", 0.78);
+          putStarCell(r0, c0 + 1, "-", 0.78);
+          putStarCell(r0, c0 + 2, ".", 0.45);
+          putStarCell(r0 - 1, c0, "|", 0.72);
+          putStarCell(r0 + 1, c0, "|", 0.72);
+        } else {
+          putStarCell(r0, c0, "@", 1.0);
+          putStarCell(r0, c0 - 4, ".", 0.38);
+          putStarCell(r0, c0 - 3, "-", 0.58);
+          putStarCell(r0, c0 - 2, "-", 0.78);
+          putStarCell(r0, c0 - 1, "-", 0.92);
+          putStarCell(r0, c0 + 1, "-", 0.92);
+          putStarCell(r0, c0 + 2, "-", 0.78);
+          putStarCell(r0, c0 + 3, "-", 0.58);
+          putStarCell(r0, c0 + 4, ".", 0.38);
+          putStarCell(r0 - 2, c0, ".", 0.45);
+          putStarCell(r0 - 1, c0, "|", 0.85);
+          putStarCell(r0 + 1, c0, "|", 0.85);
+          putStarCell(r0 + 2, c0, ".", 0.45);
+        }
+      }
+    }
+
+    // --- DRAW FULLSCREEN COLORED ASCII GRID TO CANVAS ---
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.font = `bold ${FONT_PX}px Consolas, "Courier New", monospace`;
+    ctx.textBaseline = "top";
+
+    for (let r = 0; r < ROWS; r++) {
+      const py = r * CELL_H;
+      for (let c = 0; c < COLS; c++) {
+        const idx = r * COLS + c;
+        const idx3 = idx * 3;
+        const portalMask = clamp(pmBuf[idx] * spaceVis + deepSpace, 0.0, 1.0);
+
+        let cr = mix(eyeRGB[idx3],     spaceRGB[idx3],     portalMask) * fadeIn;
+        let cg = mix(eyeRGB[idx3 + 1], spaceRGB[idx3 + 1], portalMask) * fadeIn;
+        let cb = mix(eyeRGB[idx3 + 2], spaceRGB[idx3 + 2], portalMask) * fadeIn;
+
+        cr = clamp(Math.pow(clamp(cr, 0, 1), 0.74) * 1.18, 0, 1);
+        cg = clamp(Math.pow(clamp(cg, 0, 1), 0.74) * 1.18, 0, 1);
+        cb = clamp(Math.pow(clamp(cb, 0, 1), 0.74) * 1.18, 0, 1);
+
+        const lum = 0.299 * cr + 0.587 * cg + 0.114 * cb;
+        let ch = RAMP[clamp(Math.floor(lum * (N_RAMP - 1)), 0, N_RAMP - 1)];
+        if (portalMask > 0.30 && starCharBuf[idx] !== "") {
+          ch = starCharBuf[idx];
+        }
+        if (ch === " ") continue;
+
+        const R8 = (cr * 255) | 0;
+        const G8 = (cg * 255) | 0;
+        const B8 = (cb * 255) | 0;
+        ctx.fillStyle = `rgb(${R8},${G8},${B8})`;
+        ctx.fillText(ch, c * CELL_W, py);
+      }
+    }
+  }
+
+  let paused = false;
+  let simTime = 0.0;
+  let lastWall = performance.now();
+
+  function loop(now) {
+    const dt = Math.min(0.1, (now - lastWall) / 1000);
+    lastWall = now;
+    if (!paused) {
+      simTime = (simTime + dt) % 15.5;
+      timeSlider.value = simTime.toFixed(2);
+      timeLabel.textContent = simTime.toFixed(1) + "s";
+    }
+    renderFrame(simTime);
+    requestAnimationFrame(loop);
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    } else {
+      document.exitFullscreen?.().catch(() => {});
+    }
+  }
+
+  btnPlayPause.addEventListener("click", () => {
+    paused = !paused;
+    btnPlayPause.textContent = paused ? "Play" : "Pause";
+  });
+
+  btnRestart.addEventListener("click", () => {
+    simTime = 0.0;
+    timeSlider.value = "0";
+    timeLabel.textContent = "0.0s";
+  });
+
+  btnFullscreen.addEventListener("click", toggleFullscreen);
+  canvas.addEventListener("dblclick", toggleFullscreen);
+
+  timeSlider.addEventListener("input", (e) => {
+    simTime = parseFloat(e.target.value);
+    timeLabel.textContent = simTime.toFixed(1) + "s";
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && e.target.tagName !== "INPUT") {
+      e.preventDefault();
+      btnPlayPause.click();
+    } else if (e.key.toLowerCase() === "r") {
+      btnRestart.click();
+    } else if (e.key.toLowerCase() === "f") {
+      toggleFullscreen();
+    }
+  });
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
